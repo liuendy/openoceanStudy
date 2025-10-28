@@ -481,7 +481,7 @@ class KShortestPathsFinder {
 ```mermaid
 graph TB
     subgraph "状态定义"
-        STATE[dp[token][amount][hops]]
+        STATE["dp(token, amount, hops)"]
         TOKEN[当前代币]
         AMOUNT[当前数量]
         HOPS[跳数限制]

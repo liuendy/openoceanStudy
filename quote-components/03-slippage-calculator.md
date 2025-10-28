@@ -172,9 +172,9 @@ flowchart TD
     G --> H[计算最终滑点]
 
     subgraph "公式"
-        I[K = x * y]
-        J[y_out = y - K/(x + x_in)]
-        K[price_impact = (spot_price - exec_price) / spot_price]
+        I["K = x * y"]
+        J["y_out = y - K÷(x + x_in)"]
+        K["price_impact = (spot_price - exec_price) ÷ spot_price"]
     end
 ```
 
@@ -447,7 +447,7 @@ graph LR
     end
 
     subgraph "GARCH模型"
-        GARCH[GARCH(1,1)]
+        GARCH["GARCH(1,1)"]
         EGARCH[EGARCH]
         TGARCH[T-GARCH]
     end

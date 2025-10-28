@@ -149,6 +149,162 @@ const poolData = [
 
 ### 3. Graph（图）数据结构 - 核心！
 
+#### 可视化图结构
+
+```mermaid
+graph LR
+    %% 节点样式定义
+    classDef stable fill:#90EE90,stroke:#333,stroke-width:3px,color:#000
+    classDef popular fill:#87CEEB,stroke:#333,stroke-width:3px,color:#000
+    classDef normal fill:#FFE4B5,stroke:#333,stroke-width:2px,color:#000
+
+    %% 节点定义（代币）
+    USDT[USDT<br/>稳定币<br/>流动性: $150M]:::stable
+    USDC[USDC<br/>稳定币<br/>流动性: $260M]:::stable
+    ETH[ETH<br/>以太坊<br/>流动性: $360M]:::popular
+    SHIB[SHIB<br/>柴犬币<br/>流动性: $5.5M]:::normal
+    WBTC[WBTC<br/>包装比特币<br/>流动性: $195M]:::popular
+
+    %% 边定义（交易池）
+    USDT ---|"pool_001<br/>费: 0.05%<br/>TVL: $100M"| ETH
+    USDT ---|"pool_004<br/>费: 0.04%<br/>TVL: $200M"| USDC
+    USDC ---|"pool_003<br/>费: 0.3%<br/>TVL: $60M"| ETH
+    ETH ---|"pool_002<br/>费: 0.3%<br/>TVL: $5.5M"| SHIB
+    ETH ---|"pool_005<br/>费: 0.3%<br/>TVL: $195M"| WBTC
+```
+
+#### 图的详细结构（带权重）
+
+```mermaid
+graph TB
+    subgraph "流动性图谱"
+        %% 样式定义
+        classDef highLiquidity fill:#4CAF50,stroke:#2E7D32,stroke-width:4px,color:#fff,font-weight:bold
+        classDef medLiquidity fill:#2196F3,stroke:#1565C0,stroke-width:3px,color:#fff
+        classDef lowLiquidity fill:#FFC107,stroke:#F57C00,stroke-width:2px,color:#000
+
+        %% 节点
+        USDT("USDT<br/>💰 $150M<br/>2 pools"):::highLiquidity
+        ETH("ETH<br/>💎 $360M<br/>4 pools"):::highLiquidity
+        USDC("USDC<br/>💵 $260M<br/>2 pools"):::highLiquidity
+        WBTC("WBTC<br/>🪙 $195M<br/>1 pool"):::medLiquidity
+        SHIB("SHIB<br/>🐕 $5.5M<br/>1 pool"):::lowLiquidity
+
+        %% 连接线（粗细表示流动性大小）
+        USDT ===|"0.05%<br/>权重:0.05"| ETH
+        USDT ===|"0.04%<br/>权重:0.04"| USDC
+        USDC ==|"0.3%<br/>权重:0.35"| ETH
+        ETH --|"0.3%<br/>权重:0.35"| SHIB
+        ETH ==|"0.3%<br/>权重:0.32"| WBTC
+    end
+
+    subgraph "图例"
+        L1["=== 高流动性 > $100M"]
+        L2["== 中流动性 $50-100M"]
+        L3["-- 低流动性 < $50M"]
+    end
+```
+
+#### 最短路径算法执行可视化
+
+```mermaid
+graph LR
+    subgraph "第1步: 从USDT开始"
+        A_USDT[USDT<br/>距离: 0]:::current
+        A_ETH[ETH<br/>距离: ∞]:::unvisited
+        A_SHIB[SHIB<br/>距离: ∞]:::unvisited
+        A_USDC[USDC<br/>距离: ∞]:::unvisited
+        A_WBTC[WBTC<br/>距离: ∞]:::unvisited
+
+        A_USDT -.->|"计算中"| A_ETH
+        A_USDT -.->|"计算中"| A_USDC
+    end
+
+    subgraph "第2步: 更新相邻节点"
+        B_USDT[USDT<br/>距离: 0]:::visited
+        B_ETH[ETH<br/>距离: 0.6]:::updated
+        B_SHIB[SHIB<br/>距离: ∞]:::unvisited
+        B_USDC[USDC<br/>距离: 0.4]:::updated
+        B_WBTC[WBTC<br/>距离: ∞]:::unvisited
+
+        B_USDT -->|"✓"| B_ETH
+        B_USDT -->|"✓"| B_USDC
+    end
+
+    subgraph "第3步: 处理USDC"
+        C_USDT[USDT<br/>距离: 0]:::visited
+        C_ETH[ETH<br/>距离: 0.6]:::unvisited
+        C_SHIB[SHIB<br/>距离: ∞]:::unvisited
+        C_USDC[USDC<br/>距离: 0.4]:::current
+        C_WBTC[WBTC<br/>距离: ∞]:::unvisited
+
+        C_USDT --> C_USDC
+        C_USDC -.->|"3.5>0.6"| C_ETH
+    end
+
+    subgraph "第4步: 处理ETH"
+        D_USDT[USDT<br/>距离: 0]:::visited
+        D_ETH[ETH<br/>距离: 0.6]:::current
+        D_SHIB[SHIB<br/>距离: ∞]:::unvisited
+        D_USDC[USDC<br/>距离: 0.4]:::visited
+        D_WBTC[WBTC<br/>距离: ∞]:::unvisited
+
+        D_USDT --> D_ETH
+        D_ETH -.->|"计算中"| D_SHIB
+        D_ETH -.->|"计算中"| D_WBTC
+    end
+
+    subgraph "第5步: 找到最优路径"
+        E_USDT[USDT<br/>距离: 0]:::visited
+        E_ETH[ETH<br/>距离: 0.6]:::visited
+        E_SHIB[SHIB<br/>距离: 5.6]:::target
+        E_USDC[USDC<br/>距离: 0.4]:::visited
+        E_WBTC[WBTC<br/>距离: 3.7]:::visited
+
+        E_USDT ==>|"最优路径"| E_ETH
+        E_ETH ==>|"最优路径"| E_SHIB
+    end
+
+    %% 样式定义
+    classDef current fill:#FF9800,stroke:#E65100,stroke-width:3px,color:#fff,font-weight:bold
+    classDef visited fill:#4CAF50,stroke:#2E7D32,stroke-width:2px,color:#fff
+    classDef updated fill:#2196F3,stroke:#0D47A1,stroke-width:2px,color:#fff
+    classDef unvisited fill:#E0E0E0,stroke:#757575,stroke-width:1px,color:#333
+    classDef target fill:#F44336,stroke:#B71C1C,stroke-width:3px,color:#fff,font-weight:bold
+```
+
+#### 路径对比图
+
+```mermaid
+graph TB
+    subgraph "所有可能的路径"
+        Start[起点: USDT<br/>1000 USDT]:::start
+
+        %% 路径1: 直达
+        Start -->|"pool_001<br/>费:0.05%"| Path1_ETH[ETH]:::path1
+        Path1_ETH -->|"pool_002<br/>费:0.3%"| End1[SHIB<br/>成本:5.6 USDT<br/>✅最优]:::optimal
+
+        %% 路径2: 经过USDC
+        Start -->|"pool_004<br/>费:0.04%"| Path2_USDC[USDC]:::path2
+        Path2_USDC -->|"pool_003<br/>费:0.3%"| Path2_ETH[ETH]:::path2
+        Path2_ETH -->|"pool_002<br/>费:0.3%"| End2[SHIB<br/>成本:8.9 USDT<br/>❌次优]:::suboptimal
+
+        %% 路径3: 经过WBTC（理论路径）
+        Start -.->|"无直接池"| Path3_WBTC[WBTC]:::path3
+        Path3_WBTC -.->|"需要中转"| Path3_ETH[ETH]:::path3
+        Path3_ETH -.->|"pool_002"| End3[SHIB<br/>不可行]:::invalid
+    end
+
+    %% 样式定义
+    classDef start fill:#4CAF50,stroke:#2E7D32,stroke-width:3px,color:#fff,font-weight:bold
+    classDef optimal fill:#4CAF50,stroke:#2E7D32,stroke-width:4px,color:#fff,font-weight:bold
+    classDef suboptimal fill:#FFC107,stroke:#F57C00,stroke-width:2px,color:#000
+    classDef invalid fill:#F44336,stroke:#B71C1C,stroke-width:2px,color:#fff
+    classDef path1 fill:#E3F2FD,stroke:#1976D2,stroke-width:2px
+    classDef path2 fill:#FFF3E0,stroke:#F57C00,stroke-width:2px
+    classDef path3 fill:#FFEBEE,stroke:#D32F2F,stroke-width:1px,stroke-dasharray: 5 5
+```
+
 ```javascript
 // 把所有池子构建成一个图
 const liquidityGraph = {

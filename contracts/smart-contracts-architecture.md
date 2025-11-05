@@ -2,7 +2,166 @@
 
 ## 概述
 
-本文档详细设计DEX系统的智能合约架构，包括核心交易合约、限价单合约、DCA合约、跨链桥合约等关键组件的实现原理、安全机制和优化策略。
+本文档详细设计DEX聚合器系统的智能合约架构。采用**混合执行模式**：简单交易直接调用目标DEX，复杂聚合交易和高级功能通过自有合约实现。包括聚合路由合约、限价单合约、DCA合约、跨链桥合约等关键组件的实现原理、安全机制和优化策略。
+
+## 为什么需要自有合约？
+
+### 功能对比分析
+
+| 功能类型 | 无自有合约 | 有自有合约 | 原因说明 |
+|---------|-----------|-----------|----------|
+| **单DEX简单兑换** | ✅ 可实现 | ✅ 可实现 | 直接调用即可，无需中介 |
+| **多DEX聚合路由** | ❌ 需多次交易 | ✅ 一次交易 | 需要原子性操作 |
+| **分割路由(Split)** | ❌ 手动执行 | ✅ 自动执行 | 需要精确分配和汇总 |
+| **限价单** | ❌ 无法实现 | ✅ 链下签名+链上执行 | 需要订单管理和匹配机制 |
+| **DCA定投** | ❌ 无法实现 | ✅ 自动执行 | 需要时间锁和自动触发 |
+| **跨链交易** | ❌ 无法实现 | ✅ 锁定-铸造机制 | 需要跨链验证和资产映射 |
+| **MEV保护** | ⚠️ 有限保护 | ✅ 完整保护 | 需要隐私交易和commit-reveal |
+| **平台手续费** | ❌ 无法收取 | ✅ 可以收取 | 需要中间层处理 |
+
+### 具体案例说明
+
+#### 案例1：多DEX聚合必须使用自有合约
+
+```solidity
+// ❌ 没有自有合约：用户需要执行6次交易
+// 1. Approve USDT to Uniswap
+// 2. Swap 30% on Uniswap
+// 3. Approve USDT to Curve
+// 4. Swap 40% on Curve
+// 5. Approve USDT to Balancer
+// 6. Swap 30% on Balancer
+// 问题：费用高、体验差、可能部分失败
+
+// ✅ 有自有合约：一次交易完成
+contract OpenOceanRouter {
+    function multiDEXSwap(SwapData data) external {
+        // 一次approve给Router
+        IERC20(token).transferFrom(user, this, totalAmount);
+
+        // Router内部分配到各DEX
+        _swapOnUniswap(amount * 30 / 100);
+        _swapOnCurve(amount * 40 / 100);
+        _swapOnBalancer(amount * 30 / 100);
+
+        // 汇总输出给用户
+        IERC20(outputToken).transfer(user, totalOutput);
+    }
+}
+```
+
+#### 案例2：限价单必须使用自有合约
+
+```solidity
+// 限价单需要链下签名 + 链上验证执行
+contract LimitOrderProtocol {
+    // 用户链下签名订单，不消耗Gas
+    // Maker(做市商)链上执行订单，支付Gas
+
+    function fillOrder(Order order, bytes signature) external {
+        // 1. 验证签名（确保订单真实）
+        require(verifySignature(order, signature));
+
+        // 2. 检查价格条件
+        require(getCurrentPrice() >= order.limitPrice);
+
+        // 3. 执行交换
+        transferFrom(order.maker, taker, order.fromAmount);
+        transferFrom(taker, order.maker, order.toAmount);
+    }
+}
+// 没有合约无法实现这种异步匹配机制
+```
+
+## 执行模式决策
+
+### 混合模式架构
+
+```mermaid
+graph TB
+    subgraph "用户交互层"
+        USER[用户钱包]
+        FRONT[前端应用]
+    end
+
+    subgraph "决策层"
+        ROUTER_SELECTOR[路由选择器]
+    end
+
+    subgraph "执行层"
+        subgraph "直接模式"
+            DIRECT_UNI[Uniswap Router]
+            DIRECT_SUSHI[SushiSwap Router]
+            DIRECT_CURVE[Curve Pools]
+        end
+
+        subgraph "聚合模式"
+            OUR_ROUTER[OpenOcean Router]
+            OUR_AGGREGATOR[聚合器合约]
+        end
+
+        subgraph "高级功能"
+            LIMIT_ORDER[限价单合约]
+            DCA_VAULT[DCA金库]
+            CROSS_CHAIN[跨链桥]
+        end
+    end
+
+    USER --> FRONT
+    FRONT --> ROUTER_SELECTOR
+
+    ROUTER_SELECTOR -->|简单交易| DIRECT_UNI
+    ROUTER_SELECTOR -->|简单交易| DIRECT_SUSHI
+    ROUTER_SELECTOR -->|简单交易| DIRECT_CURVE
+
+    ROUTER_SELECTOR -->|复杂聚合| OUR_ROUTER
+    OUR_ROUTER --> OUR_AGGREGATOR
+    OUR_AGGREGATOR --> DIRECT_UNI
+    OUR_AGGREGATOR --> DIRECT_SUSHI
+    OUR_AGGREGATOR --> DIRECT_CURVE
+
+    ROUTER_SELECTOR -->|高级功能| LIMIT_ORDER
+    ROUTER_SELECTOR -->|高级功能| DCA_VAULT
+    ROUTER_SELECTOR -->|高级功能| CROSS_CHAIN
+```
+
+### 执行模式选择逻辑
+
+```javascript
+// 前端路由选择器
+function selectExecutionMode(swapRequest) {
+    // 1. 简单单DEX交易 - 直接调用
+    if (swapRequest.routes.length === 1 &&
+        swapRequest.splits.length === 1 &&
+        !swapRequest.needsMEVProtection) {
+        return {
+            mode: 'DIRECT',
+            target: swapRequest.routes[0].dex,
+            contract: getDEXContract(swapRequest.routes[0].dex)
+        };
+    }
+
+    // 2. 复杂聚合交易 - 使用自有合约
+    if (swapRequest.routes.length > 1 ||
+        swapRequest.splits.length > 1 ||
+        swapRequest.needsMEVProtection) {
+        return {
+            mode: 'AGGREGATED',
+            target: 'OpenOceanRouter',
+            contract: getOurRouterContract()
+        };
+    }
+
+    // 3. 高级功能 - 必须使用自有合约
+    if (swapRequest.type in ['LIMIT_ORDER', 'DCA', 'CROSS_CHAIN']) {
+        return {
+            mode: 'ADVANCED',
+            target: swapRequest.type,
+            contract: getAdvancedContract(swapRequest.type)
+        };
+    }
+}
+```
 
 ## 合约架构总览
 
@@ -11,10 +170,10 @@
 ```mermaid
 graph TB
     subgraph "核心合约层"
-        ROUTER[DEXRouter V3<br/>路由合约]
-        AGGREGATOR[Aggregator<br/>聚合器合约]
-        FACTORY[Factory<br/>工厂合约]
-        REGISTRY[Registry<br/>注册表合约]
+        ROUTER[OpenOceanRouter<br/>聚合路由合约]
+        AGGREGATOR[PathAggregator<br/>路径聚合器]
+        EXECUTOR[SwapExecutor<br/>执行器合约]
+        REGISTRY[DEXRegistry<br/>DEX注册表]
     end
 
     subgraph "功能合约层"
@@ -60,11 +219,11 @@ graph TB
 
 ## 核心合约设计
 
-### 1. DEX Router V3合约
+### 1. OpenOcean聚合路由合约
 
 ```solidity
-// 路由器合约 - 核心入口点
-contract DEXRouterV3 {
+// 聚合路由合约 - 处理复杂的多DEX交易
+contract OpenOceanRouter {
 
     // 状态变量
     address public immutable factory;
@@ -89,6 +248,21 @@ contract DEXRouterV3 {
         address[] tokens;
         uint256[] fees;
         bytes routeCode;
+    }
+
+    // 执行模式
+    enum ExecutionMode {
+        DIRECT,      // 直接调用目标DEX
+        AGGREGATED,  // 通过聚合器执行
+        ADVANCED     // 高级功能(限价单等)
+    }
+
+    // 路由配置
+    struct RouteConfig {
+        ExecutionMode mode;
+        address targetContract;
+        uint256 splits;        // 分割数量
+        bool needsMEVProtection;
     }
 }
 ```
@@ -125,7 +299,63 @@ sequenceDiagram
 #### 核心功能实现
 
 ```solidity
-// 精确输入交换
+// 聚合交换 - 支持多DEX和分割路由
+function aggregatedSwap(
+    SwapDescription memory desc,
+    RouteConfig memory config,
+    Route[] memory routes
+) external payable returns (uint256 returnAmount) {
+    // 1. 判断执行模式
+    if (config.mode == ExecutionMode.DIRECT) {
+        // 直接模式不应该调用此合约
+        revert("Use direct DEX call instead");
+    }
+
+    // 2. 转入代币
+    IERC20(desc.srcToken).safeTransferFrom(
+        msg.sender, address(this), desc.amount
+    );
+
+    // 3. 执行聚合交换
+    uint256 totalOutput = 0;
+    uint256 remaining = desc.amount;
+
+    for (uint i = 0; i < routes.length; i++) {
+        Route memory route = routes[i];
+        uint256 routeAmount = remaining * route.percentage / 10000;
+
+        if (route.dexType == DEXType.UNISWAP_V3) {
+            totalOutput += _swapOnUniswapV3(route, routeAmount);
+        } else if (route.dexType == DEXType.CURVE) {
+            totalOutput += _swapOnCurve(route, routeAmount);
+        } else if (route.dexType == DEXType.BALANCER) {
+            totalOutput += _swapOnBalancer(route, routeAmount);
+        }
+        // 支持更多DEX...
+    }
+
+    // 4. 检查滑点
+    require(totalOutput >= desc.minReturnAmount, "Slippage check failed");
+
+    // 5. 转出代币
+    IERC20(desc.dstToken).safeTransfer(desc.dstReceiver, totalOutput);
+
+    // 6. 收取平台费用（如果有）
+    if (feeRate > 0) {
+        uint256 fee = totalOutput * feeRate / 10000;
+        IERC20(desc.dstToken).safeTransfer(feeCollector, fee);
+        totalOutput -= fee;
+    }
+
+    emit AggregatedSwapExecuted(
+        msg.sender, desc.srcToken, desc.dstToken,
+        desc.amount, totalOutput, routes.length
+    );
+
+    return totalOutput;
+}
+
+// 精确输入交换（保留兼容性）
 function swapExactTokensForTokens(
     uint256 amountIn,
     uint256 amountOutMin,
@@ -172,7 +402,70 @@ function _swap(uint[] memory amounts, address[] memory path, address to) interna
 }
 ```
 
-### 2. 限价单合约
+### 2. 内部DEX调用实现
+
+```solidity
+// 内部实现对各个DEX的调用
+contract DEXAdapter {
+
+    // Uniswap V3调用
+    function _swapOnUniswapV3(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint24 fee
+    ) internal returns (uint256 amountOut) {
+        // 授权给Uniswap Router
+        IERC20(tokenIn).approve(UNISWAP_V3_ROUTER, amountIn);
+
+        // 构建swap参数
+        ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
+            tokenIn: tokenIn,
+            tokenOut: tokenOut,
+            fee: fee,
+            recipient: address(this),
+            deadline: block.timestamp,
+            amountIn: amountIn,
+            amountOutMinimum: 0,
+            sqrtPriceLimitX96: 0
+        });
+
+        // 执行swap
+        amountOut = ISwapRouter(UNISWAP_V3_ROUTER).exactInputSingle(params);
+    }
+
+    // Curve调用
+    function _swapOnCurve(
+        address pool,
+        int128 i,
+        int128 j,
+        uint256 amountIn
+    ) internal returns (uint256 amountOut) {
+        // Curve使用不同的接口
+        IERC20(tokens[uint128(i)]).approve(pool, amountIn);
+
+        uint256 balanceBefore = IERC20(tokens[uint128(j)]).balanceOf(address(this));
+        ICurvePool(pool).exchange(i, j, amountIn, 0);
+        amountOut = IERC20(tokens[uint128(j)]).balanceOf(address(this)) - balanceBefore;
+    }
+
+    // Balancer调用
+    function _swapOnBalancer(
+        IBalancerVault.SingleSwap memory singleSwap,
+        IBalancerVault.FundManagement memory funds,
+        uint256 limit
+    ) internal returns (uint256 amountOut) {
+        return IBalancerVault(BALANCER_VAULT).swap(
+            singleSwap,
+            funds,
+            limit,
+            block.timestamp
+        );
+    }
+}
+```
+
+### 3. 限价单合约
 
 ```solidity
 contract LimitOrderProtocol {
@@ -495,6 +788,66 @@ function releaseTokens(
 }
 ```
 
+## 与后端服务的交互
+
+### 服务与合约的职责划分
+
+```mermaid
+graph LR
+    subgraph "后端服务职责"
+        QUOTE[报价服务<br/>计算最优路径]
+        SIMULATE[模拟服务<br/>预估结果]
+        MONITOR[监控服务<br/>跟踪状态]
+    end
+
+    subgraph "智能合约职责"
+        EXECUTE[执行交易]
+        VALIDATE[验证参数]
+        TRANSFER[转移资产]
+        PROTECT[MEV保护]
+    end
+
+    subgraph "协作流程"
+        QUOTE -->|路径数据| EXECUTE
+        SIMULATE -->|Gas估算| VALIDATE
+        EXECUTE -->|事件日志| MONITOR
+        VALIDATE -->|安全检查| PROTECT
+    end
+```
+
+### 数据流转示例
+
+```javascript
+// 1. 后端计算路径
+const optimalRoute = await quoteService.findBestRoute({
+    from: 'USDT',
+    to: 'ETH',
+    amount: '10000'
+});
+
+// 2. 前端决策执行模式
+const executionMode = determineExecutionMode(optimalRoute);
+
+if (executionMode === 'DIRECT') {
+    // 3a. 直接调用Uniswap
+    const tx = await uniswapRouter.swap({
+        path: optimalRoute.path,
+        amountIn: optimalRoute.amountIn,
+        amountOutMin: optimalRoute.amountOutMin
+    });
+} else if (executionMode === 'AGGREGATED') {
+    // 3b. 调用OpenOcean聚合器
+    const tx = await openOceanRouter.aggregatedSwap({
+        description: swapDesc,
+        config: routeConfig,
+        routes: optimalRoute.routes
+    });
+}
+
+// 4. 监控服务跟踪交易
+await monitorService.trackTransaction(tx.hash);
+```
+
 ## 安全机制设计
 
 ### 1. 多签钱包合约
@@ -774,3 +1127,64 @@ sequenceDiagram
   - 升级成功率: 100%
   - 事故恢复时间: < 1小时
 ```
+
+## 架构设计总结
+
+### 混合执行模式的优势
+
+1. **灵活性**：根据交易复杂度智能选择执行路径
+2. **效率**：简单交易直接执行，复杂交易统一聚合
+3. **功能性**：支持限价单、DCA等高级功能
+4. **经济性**：优化Gas消耗，减少用户成本
+
+### 关键设计决策
+
+| 决策点 | 选择 | 原因 |
+|--------|------|------|
+| **执行模式** | 混合模式 | 平衡简单性和功能性 |
+| **合约架构** | 模块化设计 | 易于维护和升级 |
+| **DEX集成** | 适配器模式 | 支持多种DEX协议 |
+| **安全机制** | 多层防护 | 时间锁+多签+紧急暂停 |
+| **升级策略** | 透明代理 | 保持地址不变，逻辑可升级 |
+
+### 与传统DEX的区别
+
+```mermaid
+graph LR
+    subgraph "传统DEX"
+        TD1[单一流动性池]
+        TD2[固定交易对]
+        TD3[简单AMM]
+    end
+
+    subgraph "聚合器DEX"
+        AD1[多源流动性]
+        AD2[智能路由]
+        AD3[复杂优化]
+        AD4[高级功能]
+    end
+
+    TD1 -.->|演进| AD1
+    TD2 -.->|演进| AD2
+    TD3 -.->|演进| AD3
+    AD3 --> AD4
+```
+
+### 实施建议
+
+1. **分阶段部署**
+   - Phase 1：核心聚合功能
+   - Phase 2：限价单系统
+   - Phase 3：DCA和跨链功能
+
+2. **风险控制**
+   - 初期设置交易限额
+   - 逐步开放支持的DEX
+   - 建立紧急响应机制
+
+3. **性能优化**
+   - 缓存常用路径
+   - 批量处理交易
+   - 动态Gas价格调整
+
+这种混合架构设计既保留了去中心化的特性，又提供了中心化服务的便利性，是DEX聚合器的最佳实践。

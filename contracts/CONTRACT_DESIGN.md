@@ -1334,6 +1334,385 @@ const swapTx = await aggregatorContract.swap(
 // 4. 发送交易
 ```
 
+## 8. 函数选择器详细解析
+
+### 8.1 什么是函数选择器
+
+函数选择器是智能合约调用的"身份证"，告诉合约要执行哪个函数。
+
+```javascript
+// 调用数据结构
+const callData = "0x" + functionSelector + encodedParameters;
+
+// 例子：
+// 0xc04b8d59 + 000000...  = 调用exactInput函数 + 参数
+// 0x3df02124 + 000000...  = 调用exchange函数 + 参数
+```
+
+### 8.2 函数选择器计算过程
+
+#### 8.2.1 Uniswap V3 的 exactInput 函数
+
+**第1步：确定函数签名**
+```solidity
+// Solidity中的函数定义
+function exactInput(ExactInputParams calldata params) external returns (uint256);
+
+// 其中ExactInputParams是一个结构体：
+struct ExactInputParams {
+    bytes path;
+    address recipient;
+    uint256 deadline;
+    uint256 amountIn;
+    uint256 amountOutMinimum;
+}
+```
+
+**第2步：构建标准化函数签名**
+```javascript
+// 注意：要用标准类型，不能用自定义结构体名
+const functionSignature = "exactInput((bytes,address,uint256,uint256,uint256))";
+
+// 解释：
+// exactInput        <- 函数名
+// (                 <- 参数开始
+//   (               <- 结构体开始
+//     bytes,        <- path参数类型
+//     address,      <- recipient参数类型
+//     uint256,      <- deadline参数类型
+//     uint256,      <- amountIn参数类型
+//     uint256       <- amountOutMinimum参数类型
+//   )               <- 结构体结束
+// )                 <- 参数结束
+```
+
+**第3步：计算Keccak-256哈希**
+```javascript
+// 使用Keccak-256哈希函数
+const fullHash = keccak256("exactInput((bytes,address,uint256,uint256,uint256))");
+
+// 得到完整哈希值（32字节 = 64个十六进制字符）
+// 0xc04b8d59e1f1e4bf6f2b5c3d8e7a9f4b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7
+//   ^^^^^^^^ 前4字节就是函数选择器
+```
+
+**第4步：提取前4字节作为选择器**
+```javascript
+const functionSelector = fullHash.substring(0, 10); // 0x + 8个字符 = 4字节
+// 结果：0xc04b8d59
+
+// 为什么是4字节？
+// - 4字节 = 32位 = 2^32 = 约43亿种可能
+// - 对于一个合约的函数数量，碰撞概率极低
+// - 节省存储空间和Gas成本
+```
+
+#### 8.2.2 Curve 的 exchange 函数
+
+**第1步：Solidity函数定义**
+```solidity
+function exchange(
+    int128 i,           // 输入代币索引
+    int128 j,           // 输出代币索引
+    uint256 dx,         // 输入数量
+    uint256 min_dy      // 最小输出数量
+) external returns (uint256);
+```
+
+**第2步：构建函数签名**
+```javascript
+const functionSignature = "exchange(int128,int128,uint256,uint256)";
+
+// 解释：
+// exchange          <- 函数名
+// (                 <- 参数开始
+//   int128,         <- i参数类型（有符号128位整数）
+//   int128,         <- j参数类型
+//   uint256,        <- dx参数类型（无符号256位整数）
+//   uint256         <- min_dy参数类型
+// )                 <- 参数结束
+```
+
+**第3步：计算哈希**
+```javascript
+const fullHash = keccak256("exchange(int128,int128,uint256,uint256)");
+// 结果：0x3df02124a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8
+//       ^^^^^^^^ 前4字节
+```
+
+**第4步：提取选择器**
+```javascript
+const selector = fullHash.substring(0, 10);
+// 结果：0x3df02124
+```
+
+### 8.3 完整的计算示例
+
+```javascript
+// 手动计算函数选择器的JavaScript代码
+const { keccak256 } = require('@ethersproject/keccak256');
+const { toUtf8Bytes } = require('@ethersproject/strings');
+
+function calculateFunctionSelector(signature) {
+    // 1. 将函数签名转换为字节
+    const signatureBytes = toUtf8Bytes(signature);
+
+    // 2. 计算Keccak-256哈希
+    const hash = keccak256(signatureBytes);
+
+    // 3. 取前4字节（8个十六进制字符）
+    const selector = hash.substring(0, 10);
+
+    return selector;
+}
+
+// 测试
+console.log(calculateFunctionSelector("exactInput((bytes,address,uint256,uint256,uint256))"));
+// 输出: 0xc04b8d59
+
+console.log(calculateFunctionSelector("exchange(int128,int128,uint256,uint256)"));
+// 输出: 0x3df02124
+```
+
+### 8.4 为什么需要函数选择器
+
+#### 8.4.1 合约调用机制
+```javascript
+// 当你调用智能合约时，实际发生的是：
+const transaction = {
+    to: "0x1234...abcd",        // 合约地址
+    data: "0xc04b8d59000000..." // 调用数据
+};
+
+// 合约收到调用后：
+// 1. 读取前4字节：0xc04b8d59
+// 2. 查找对应的函数：exactInput
+// 3. 解码剩余数据作为参数
+// 4. 执行该函数
+```
+
+#### 8.4.2 节省Gas的设计
+```solidity
+// 合约内部的函数分发器（编译器自动生成）
+contract MyContract {
+    function exactInput(...) external { /* 实现 */ }
+    function exchange(...) external { /* 实现 */ }
+
+    // 编译后生成类似这样的分发逻辑：
+    function dispatcher() internal {
+        bytes4 selector = msg.data[0:4];
+
+        if (selector == 0xc04b8d59) {
+            return exactInput(/* 解码参数 */);
+        } else if (selector == 0x3df02124) {
+            return exchange(/* 解码参数 */);
+        }
+        // ... 其他函数
+    }
+}
+```
+
+### 8.5 常见的函数选择器
+
+```javascript
+// ERC20标准函数选择器
+const commonSelectors = {
+    "transfer(address,uint256)": "0xa9059cbb",
+    "transferFrom(address,address,uint256)": "0x23b872dd",
+    "approve(address,uint256)": "0x095ea7b3",
+    "balanceOf(address)": "0x70a08231",
+
+    // Uniswap V2
+    "swapExactTokensForTokens(uint256,uint256,address[],address,uint256)": "0x38ed1739",
+
+    // Uniswap V3
+    "exactInput((bytes,address,uint256,uint256,uint256))": "0xc04b8d59",
+
+    // Curve
+    "exchange(int128,int128,uint256,uint256)": "0x3df02124"
+};
+```
+
+### 8.6 函数选择器碰撞
+
+```javascript
+// 极少情况下可能发生碰撞
+const collision = {
+    function1: "someFunction(uint256)",
+    function2: "otherFunction(bytes32)",
+    // 如果两个函数计算出相同的4字节选择器，就会发生碰撞
+};
+
+// 解决方案：
+// 1. 重新命名函数
+// 2. 调整参数类型
+// 3. 使用函数重载（不同参数签名）
+```
+
+### 8.7 实际开发中的应用
+
+```javascript
+// 使用ethers.js，库会自动计算选择器
+const contract = new ethers.Contract(address, abi, signer);
+
+// 这行代码内部会：
+// 1. 根据函数名和参数生成签名
+// 2. 计算函数选择器
+// 3. 编码参数
+// 4. 组装完整的调用数据
+await contract.exactInput({
+    path: "0x...",
+    recipient: "0x...",
+    deadline: 1703145600,
+    amountIn: "3000000000",
+    amountOutMinimum: "1300000000000000000000"
+});
+```
+
+## 9. 以太坊地址为什么是20字节
+
+### 9.1 地址生成原理
+
+以太坊地址不是随机生成的，而是通过加密算法计算得出：
+
+```javascript
+// 地址生成过程
+const publicKey = "04a1b2c3d4..."; // 64字节公钥 (不包含前缀04)
+const keccakHash = keccak256(publicKey); // 计算Keccak-256哈希
+const address = "0x" + keccakHash.slice(-40); // 取最后20字节作为地址
+
+// 实际例子：
+const publicKey = "04a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2";
+const keccakHash = "abcd1234567890abcdef1234567890abcdefdac17f958d2ee523a2206206994597c13d831ec7";
+const address = "0xdac17f958d2ee523a2206206994597c13d831ec7"; // 最后40个字符 = 20字节
+```
+
+### 9.2 为什么选择20字节
+
+#### 9.2.1 安全性考虑
+```javascript
+// 20字节 = 160位
+const totalPossibleAddresses = 2**160;
+console.log(totalPossibleAddresses);
+// 约等于 1.46 × 10^48 个可能地址
+
+// 碰撞概率极低
+const addressesGenerated = 10**9; // 10亿个地址
+const collisionProbability = addressesGenerated / totalPossibleAddresses;
+console.log(collisionProbability); // 约等于 6.8 × 10^-40 (几乎不可能)
+```
+
+#### 9.2.2 存储效率
+```solidity
+// 在Solidity中，address类型恰好占用一个存储槽的一部分
+contract StorageExample {
+    address user;        // 20字节
+    uint96 balance;      // 12字节
+    // 总计32字节，恰好一个存储槽，Gas高效
+}
+
+// 如果地址是32字节：
+contract IneffcientStorage {
+    address user;        // 32字节 = 1个存储槽
+    uint256 balance;     // 32字节 = 1个存储槽
+    // 总计需要2个存储槽，Gas成本更高
+}
+```
+
+### 9.3 地址格式解析
+
+以USDT地址为例：`0xdac17f958d2ee523a2206206994597c13d831ec7`
+
+```javascript
+// 十六进制格式分析
+const address = "0xdac17f958d2ee523a2206206994597c13d831ec7";
+
+// 去掉0x前缀
+const hexOnly = "dac17f958d2ee523a2206206994597c13d831ec7"; // 40个字符
+
+// 每2个字符表示1字节
+const bytes = [
+    "da", "c1", "7f", "95", "8d", "2e", "e5", "23",
+    "a2", "20", "62", "06", "99", "45", "97", "c1",
+    "3d", "83", "1e", "c7"
+]; // 20个字节
+
+// 转换为十进制
+bytes.map(hex => parseInt(hex, 16));
+// [218, 193, 127, 149, 141, 46, 229, 35, 162, 32, 98, 6, 153, 69, 151, 193, 61, 131, 30, 199]
+```
+
+### 9.4 地址校验和（EIP-55）
+
+```javascript
+// 以太坊使用混合大小写来检测地址错误
+const validAddress = "0xdAC17F958D2ee523a2206206994597C13D831ec7"; // 正确格式
+
+function isValidChecksum(address) {
+    const hash = keccak256(address.toLowerCase().slice(2));
+
+    for (let i = 0; i < 40; i++) {
+        const char = address[i + 2];
+        const shouldBeUppercase = parseInt(hash[i], 16) >= 8;
+
+        if (char.toLowerCase() !== char.toUpperCase()) {
+            if (char.toUpperCase() === char && !shouldBeUppercase) return false;
+            if (char.toLowerCase() === char && shouldBeUppercase) return false;
+        }
+    }
+    return true;
+}
+```
+
+### 9.5 实际应用中的优势
+
+#### 9.5.1 网络传输
+```javascript
+// JSON-RPC调用
+const request = {
+    "method": "eth_getBalance",
+    "params": ["0xdac17f958d2ee523a2206206994597c13d831ec7"], // 42字符（包含0x）
+    "id": 1
+};
+
+// 如果地址是32字节，需要66字符，增加传输成本
+```
+
+#### 9.5.2 用户体验
+```javascript
+// 20字节地址便于：
+// 1. 记忆和输入（42字符 vs 66字符）
+// 2. 二维码生成（更少数据）
+// 3. 界面显示（适中长度）
+
+const displayAddress = "0xdac1...1ec7"; // 通常显示前4后4字符
+```
+
+### 9.6 与其他区块链对比
+
+```javascript
+// 不同区块链的地址长度
+const addressComparison = {
+    ethereum: {
+        length: "20字节",
+        format: "0xdac17f958d2ee523a2206206994597c13d831ec7",
+        security: "2^160 = 1.46×10^48"
+    },
+    bitcoin: {
+        length: "20字节（P2PKH）/ 32字节（P2WSH）",
+        format: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
+        security: "2^160 = 1.46×10^48"
+    },
+    solana: {
+        length: "32字节",
+        format: "11111111111111111111111111111112",
+        security: "2^256 = 1.15×10^77"
+    }
+};
+
+// 以太坊选择20字节是安全性和效率的平衡
+```
+
 ### 总结
 
 这些看似复杂的编码数据实际上是：
@@ -1342,9 +1721,16 @@ const swapTx = await aggregatorContract.swap(
 2. **优化的数据格式**：最小化Gas成本和传输开销
 3. **安全的验证机制**：通过哈希和签名确保数据完整性
 
+**以太坊地址设计的智慧**：
+- **20字节长度**：在安全性（2^160种可能）和效率之间的完美平衡
+- **十六进制格式**：便于程序处理和人类读取
+- **校验和机制**：防止输入错误，提高用户体验
+- **存储优化**：与Solidity存储槽完美配合，降低Gas成本
+
 理解这些编码有助于：
 - **调试交易失败**：知道数据在哪一步出错
 - **优化Gas使用**：选择更高效的数据结构
 - **增强安全意识**：理解数据如何被验证和处理
+- **深入理解区块链**：掌握底层数据结构的设计原理
 
 现代开发中，这些复杂性大多被SDK和库抽象掉了，但了解底层原理有助于构建更可靠的DeFi应用。

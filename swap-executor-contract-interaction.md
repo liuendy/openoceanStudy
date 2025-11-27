@@ -108,9 +108,15 @@ const quoteResponse = {
     },
     {
       dex: "Balancer",
-      protocol: "0xBA12222222228d8Ba445958a75a0704d566BF2C8",  // Balancer Vault
+      protocol: "0xBA12222222228d8Ba445958a75a0704d566BF2C8",  // Balancer Vault（唯一入口）
       percentage: 25,  // 25%通过Balancer
+      // Balancer 架构：所有池子资金都存在同一个 Vault 合约
+      // 用 poolId 来区分具体使用哪个池子
       poolId: "0x96646936b91d6b9d7d0c47c496afbf3d6ec7b6f8000200000000000000000019",
+      // poolId 结构：
+      // - 前40字符(20字节): 池子合约地址 0x96646936b91d6b9d7d0c47c496afbf3d6ec7b6f8
+      // - 中间4字符(2字节): 池类型 0002 = WeightedPool2Tokens
+      // - 后20字符(10字节): 池子编号 0x19 = #25
       expectedOutput: "1111192229121247455337"
     }
   ],
